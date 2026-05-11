@@ -8,23 +8,20 @@ import {
   type PanInfo,
 } from 'framer-motion'
 import { Onboarding } from './Onboarding'
-import type { Listing } from './types'
+import type { Listing, Action } from './types'
 import { API, LS_ACTIONS, LS_STYLE_VECTOR } from './config'
 
 const SWIPE_X = 90
 const FLICK_V = 280
-const REASON_TIMEOUT_MS = 2000
+const SWIPE_Y = 80
 
-type Action = 'like' | 'skip' | 'save'
 type Actions = Record<number, Action>
-type DislikeReason = 'not_my_style' | 'wrong_size' | 'too_expensive' | 'bad_condition' | 'none'
-
-const DISLIKE_REASONS: { label: string; value: DislikeReason }[] = [
-  { label: 'Not my style', value: 'not_my_style' },
-  { label: 'Wrong size', value: 'wrong_size' },
-  { label: 'Too expensive', value: 'too_expensive' },
-  { label: 'Bad condition', value: 'bad_condition' },
-]
+type SwipeHistoryEntry = {
+  index: number
+  photoIndex: number
+  listingId: number
+  previousAction?: Action
+}
 
 function loadActions(): Actions {
   try {
@@ -64,11 +61,11 @@ function ExternalLinkIcon() {
   )
 }
 
-function postFeedback(id: number, action: 'like' | 'dislike', reason: DislikeReason = 'none') {
+function postFeedback(id: number, action: 'like' | 'dislike', golden = false) {
   fetch(`${API}/feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ listing_id: id, action, reason }),
+    body: JSON.stringify({ listing_id: id, action, golden }),
   }).catch((err) => console.warn('feedback failed:', err))
 }
 
@@ -87,9 +84,11 @@ export default function App() {
   const [idx, setIdx] = useState(0)
   const [photoIdx, setPhotoIdx] = useState(0)
   const [actions, setActions] = useState<Actions>(loadActions)
-  const [showReasonSheet, setShowReasonSheet] = useState(false)
+  const [swipeHistory, setSwipeHistory] = useState<SwipeHistoryEntry[]>([])
+  const [showGoldenToast, setShowGoldenToast] = useState(false)
+  const [lastGoldenItem, setLastGoldenItem] = useState<Listing | null>(null)
+  const [endTab, setEndTab] = useState<'likes' | 'wants'>('wants')
   const flying = useRef(false)
-  const reasonTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [styleVector, setStyleVector] = useState<number[] | null>(loadStoredStyleVector)
   const showOnboarding = styleVector === null
 
@@ -118,12 +117,20 @@ export default function App() {
       })
   }, [styleVector])
 
+  useEffect(() => {
+    if (!showGoldenToast) return
+    const timer = setTimeout(() => setShowGoldenToast(false), 2500)
+    return () => clearTimeout(timer)
+  }, [showGoldenToast])
+
   const x = useMotionValue(0)
   const rotate = useTransform(x, [-280, 280], [-16, 16])
   const likeOpacity = useTransform(x, [20, SWIPE_X * 1.5], [0, 1])
   const skipOpacity = useTransform(x, [-SWIPE_X * 1.5, -20], [1, 0])
   const nextScale = useTransform(x, [-220, 0, 220], [0.97, 0.93, 0.97])
   const nextOpacity = useTransform(x, [-220, 0, 220], [0.8, 0.55, 0.8])
+  const y = useMotionValue(0)
+  const goldenOpacity = useTransform(y, [-SWIPE_Y * 1.5, -20], [1, 0])
 
   const current = listings[idx] as Listing | undefined
   const next = listings[idx + 1] as Listing | undefined
@@ -132,6 +139,43 @@ export default function App() {
     const updated = { ...actions, [id]: action }
     setActions(updated)
     localStorage.setItem(LS_ACTIONS, JSON.stringify(updated))
+  }
+
+  function rememberSwipe() {
+    if (!current) return
+    setSwipeHistory((prev) => [
+      ...prev,
+      {
+        index: idx,
+        photoIndex: photoIdx,
+        listingId: current.id,
+        previousAction: actions[current.id],
+      },
+    ].slice(-20))
+  }
+
+  function restorePreviousAction(entry: SwipeHistoryEntry) {
+    setActions((prev) => {
+      const updated = { ...prev }
+      if (entry.previousAction) updated[entry.listingId] = entry.previousAction
+      else delete updated[entry.listingId]
+      localStorage.setItem(LS_ACTIONS, JSON.stringify(updated))
+      return updated
+    })
+  }
+
+  function handleUndoSwipe() {
+    if (flying.current) return
+    const entry = swipeHistory.at(-1)
+    if (!entry) return
+
+    setSwipeHistory((prev) => prev.slice(0, -1))
+    setShowGoldenToast(false)
+    restorePreviousAction(entry)
+    setIdx(entry.index)
+    setPhotoIdx(entry.photoIndex)
+    x.set(0)
+    y.set(0)
   }
 
   function handleSave() {
@@ -147,50 +191,41 @@ export default function App() {
     }
   }
 
-  function commitDislike(reason: DislikeReason) {
-    if (reasonTimer.current) {
-      clearTimeout(reasonTimer.current)
-      reasonTimer.current = null
+  function flyCard(dir: 'left' | 'right') {
+    if (flying.current || !current) return
+    flying.current = true
+    rememberSwipe()
+    if (dir === 'left') {
+      recordAction(current.id, 'skip')
+      animate(x, -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
+    } else {
+      recordAction(current.id, 'like')
+      postFeedback(current.id, 'like')
+      animate(x, 700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
     }
-    setShowReasonSheet(false)
-    if (!current) {
-      flying.current = false
-      return
-    }
-    recordAction(current.id, 'skip')
-    postFeedback(current.id, 'dislike', reason)
-    animate(x, -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
     setTimeout(() => {
       setIdx((i) => i + 1)
       setPhotoIdx(0)
       x.set(0)
+      y.set(0)
       flying.current = false
     }, 360)
   }
 
-  function triggerDislikeFlow() {
+  function flyCardGolden() {
     if (flying.current || !current) return
     flying.current = true
-    setShowReasonSheet(true)
-    reasonTimer.current = setTimeout(() => {
-      commitDislike('none')
-    }, REASON_TIMEOUT_MS)
-  }
-
-  function flyCard(dir: 'left' | 'right') {
-    if (flying.current || !current) return
-    if (dir === 'left') {
-      triggerDislikeFlow()
-      return
-    }
-    flying.current = true
-    recordAction(current.id, 'like')
-    postFeedback(current.id, 'like', 'none')
-    animate(x, 700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
+    rememberSwipe()
+    recordAction(current.id, 'golden')
+    postFeedback(current.id, 'like', true)
+    setLastGoldenItem(current)
+    animate(y, -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
     setTimeout(() => {
       setIdx((i) => i + 1)
       setPhotoIdx(0)
       x.set(0)
+      y.set(0)
+      setShowGoldenToast(true)
       flying.current = false
     }, 360)
   }
@@ -198,14 +233,19 @@ export default function App() {
   function handleDragEnd(_e: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) {
     if (flying.current) return
     const ox = info.offset.x
+    const oy = info.offset.y
     const vx = info.velocity.x
+    const vy = info.velocity.y
 
-    if (ox > SWIPE_X || (ox > 30 && vx > FLICK_V)) {
+    if (oy < -SWIPE_Y || (oy < -30 && vy < -FLICK_V)) {
+      flyCardGolden()
+    } else if (ox > SWIPE_X || (ox > 30 && vx > FLICK_V)) {
       flyCard('right')
     } else if (ox < -SWIPE_X || (ox < -30 && vx < -FLICK_V)) {
       flyCard('left')
     } else {
       animate(x, 0, { type: 'spring', stiffness: 420, damping: 30 })
+      animate(y, 0, { type: 'spring', stiffness: 420, damping: 30 })
     }
   }
 
@@ -216,8 +256,8 @@ export default function App() {
     setPhotoIdx((i) => (i + 1) % images.length)
   }
 
-  const liked = Object.values(actions).filter((a) => a === 'like').length
-  const saved = Object.values(actions).filter((a) => a === 'save').length
+  const likedListings = listings.filter((listing) => actions[listing.id] === 'like')
+  const goldenListings = listings.filter((listing) => actions[listing.id] === 'golden')
 
   // ── Loading / error states ────────────────────────────────────────────────
 
@@ -256,23 +296,88 @@ export default function App() {
   }
 
   if (!current) {
+    const tabListings = endTab === 'wants' ? goldenListings : likedListings
+
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-[#0A0A0A] text-white">
-        <p className="font-bebas text-6xl tracking-[0.2em] text-white mb-1">ALL DONE</p>
-        <p className="font-mono text-xs text-white/30 tracking-wider mb-10">
-          {liked} LIKED · {saved} SAVED
-        </p>
-        <button
-          onClick={() => {
-            setIdx(0)
-            setPhotoIdx(0)
-            setActions({})
-            localStorage.removeItem(LS_ACTIONS)
-          }}
-          className="px-8 py-3 border border-white/15 text-white/40 font-mono text-xs tracking-widest hover:bg-white/5 transition-colors"
+      <div className="flex flex-col h-full bg-[#0A0A0A] text-white">
+        <div
+          className="px-5 flex items-center justify-between"
+          style={{ paddingTop: 'max(env(safe-area-inset-top), 16px)', paddingBottom: '10px' }}
         >
-          START OVER
-        </button>
+          <span className="font-bebas text-[26px] tracking-[0.3em]">PILO</span>
+          <button
+            onClick={() => {
+              setIdx(0)
+              setPhotoIdx(0)
+              setActions({})
+              setEndTab('wants')
+              setShowGoldenToast(false)
+              localStorage.removeItem(LS_ACTIONS)
+            }}
+            className="font-mono text-[10px] text-white/25 tracking-widest hover:text-white/50 transition-colors"
+          >
+            START OVER
+          </button>
+        </div>
+
+        <div className="flex border-b border-white/[0.07] mx-5">
+          {(['wants', 'likes'] as const).map((tab) => {
+            const count = tab === 'wants' ? goldenListings.length : likedListings.length
+            const active = endTab === tab
+            return (
+              <button
+                key={tab}
+                onClick={() => setEndTab(tab)}
+                className={`flex-1 py-3 font-mono text-[11px] tracking-widest uppercase transition-colors ${
+                  active ? 'text-white border-b-2 border-white/70' : 'text-white/25 hover:text-white/50'
+                }`}
+              >
+                {tab === 'wants' ? '⭐ Wants' : '♥ Likes'} ({count})
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {tabListings.length === 0 ? (
+            <div className="flex items-center justify-center h-32">
+              <p className="font-mono text-[11px] text-white/20 tracking-wider">
+                {endTab === 'wants' ? 'No golden swipes yet' : 'Nothing liked'}
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-white/[0.05]">
+              {tabListings.map((item) => (
+                <a
+                  key={item.id}
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-4 px-5 py-4 hover:bg-white/[0.03] transition-colors"
+                >
+                  <img
+                    src={item.image_urls[0] || item.image_url}
+                    className="w-14 h-14 object-cover rounded-lg flex-shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-cormorant text-lg italic text-white leading-tight truncate">
+                      {item.brand}
+                    </p>
+                    <p className="font-mono text-[10px] text-white/40 mt-0.5 leading-relaxed line-clamp-1">
+                      {item.title}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                    <span className="font-mono text-sm font-bold text-[#F0C050]">
+                      €{item.price % 1 === 0 ? item.price.toFixed(0) : item.price.toFixed(2)}
+                    </span>
+                    <span className="font-mono text-[9px] text-white/20">→</span>
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     )
   }
@@ -313,11 +418,11 @@ export default function App() {
 
         {/* Active card */}
         <motion.div
-          className="absolute inset-0 overflow-hidden cursor-grab active:cursor-grabbing"
-          style={{ x, rotate }}
-          drag="x"
-          dragConstraints={{ left: 0, right: 0 }}
-          dragElastic={0.82}
+          className="absolute inset-0 overflow-hidden bg-black cursor-grab active:cursor-grabbing"
+          style={{ x, y, rotate }}
+          drag
+          dragConstraints={{ left: 0, right: 0, top: 0, bottom: 0 }}
+          dragElastic={{ left: 0.82, right: 0.82, top: 0.82, bottom: 0 }}
           onDragEnd={handleDragEnd}
           onTap={handleCardTap}
         >
@@ -398,6 +503,14 @@ export default function App() {
             SKIP
           </motion.div>
 
+          <motion.div
+            className="absolute top-[130px] left-1/2 -translate-x-1/2 border-[3px] border-[#F0C050] text-[#F0C050] px-4 py-1 font-bebas text-[28px] tracking-widest -rotate-6 whitespace-nowrap"
+            style={{ opacity: goldenOpacity }}
+            aria-hidden
+          >
+            ⭐ WANT
+          </motion.div>
+
           {/* Vinted link */}
           <a
             href={current.url}
@@ -452,7 +565,7 @@ export default function App() {
 
       {/* Action buttons */}
       <div
-        className="absolute bottom-0 left-0 right-0 z-50 flex justify-center gap-8 px-8"
+        className="absolute bottom-0 left-0 right-0 z-50 flex justify-center gap-6 px-8"
         style={{
           paddingBottom: `max(env(safe-area-inset-bottom), 20px)`,
           paddingTop: '14px',
@@ -469,6 +582,22 @@ export default function App() {
         </motion.button>
 
         <motion.button
+          whileTap={swipeHistory.length > 0 ? { scale: 0.85 } : undefined}
+          onClick={handleUndoSwipe}
+          disabled={swipeHistory.length === 0}
+          className={`w-[48px] h-[48px] self-center rounded-full flex items-center justify-center text-lg transition-colors ${
+            swipeHistory.length > 0 ? 'text-white/65' : 'text-white/15'
+          }`}
+          style={{
+            background: swipeHistory.length > 0 ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(255,255,255,0.12)',
+          }}
+          aria-label="Undo last swipe"
+        >
+          ↶
+        </motion.button>
+
+        <motion.button
           whileTap={{ scale: 0.85 }}
           onClick={() => flyCard('right')}
           className="w-[54px] h-[54px] rounded-full flex items-center justify-center text-[#4ADE80] text-xl"
@@ -479,68 +608,39 @@ export default function App() {
         </motion.button>
       </div>
 
-      {/* Reason picker overlay + sheet */}
+      {/* Golden toast */}
       <AnimatePresence>
-        {showReasonSheet && (
-          <>
-            {/* Scrim — blocks interaction with card behind */}
-            <motion.div
-              className="absolute inset-0 z-[90]"
-              style={{ background: 'rgba(0,0,0,0.55)' }}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.18 }}
-            />
-
-            {/* Bottom sheet */}
-            <motion.div
-              className="absolute bottom-0 left-0 right-0 z-[100]"
-              initial={{ y: '100%' }}
-              animate={{ y: 0 }}
-              exit={{ y: '100%' }}
-              transition={{ type: 'spring', stiffness: 340, damping: 34 }}
-              style={{
-                background: 'rgba(14, 14, 14, 0.98)',
-                backdropFilter: 'blur(24px)',
-                WebkitBackdropFilter: 'blur(24px)',
-                borderTop: '1px solid rgba(255,255,255,0.07)',
-                paddingBottom: 'max(env(safe-area-inset-bottom), 28px)',
-              }}
+        {showGoldenToast && lastGoldenItem && (
+          <motion.div
+            className="absolute left-4 right-4 z-[110] flex items-center justify-between px-4 py-3 rounded-xl"
+            style={{
+              top: 'calc(max(env(safe-area-inset-top), 16px) + 64px)',
+              background: 'rgba(20, 16, 4, 0.95)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              border: '1px solid rgba(240, 192, 80, 0.3)',
+            }}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.18 }}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-[#F0C050] text-sm">⭐</span>
+              <span className="font-mono text-[11px] text-white/70 tracking-wide">
+                {lastGoldenItem.brand} · €{lastGoldenItem.price % 1 === 0 ? lastGoldenItem.price.toFixed(0) : lastGoldenItem.price.toFixed(2)}
+              </span>
+            </div>
+            <a
+              href={lastGoldenItem.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setShowGoldenToast(false)}
+              className="font-mono text-[11px] font-bold text-[#F0C050] tracking-wider hover:text-yellow-300 transition-colors"
             >
-              {/* Progress bar — shrinks over 2s */}
-              <motion.div
-                className="absolute top-0 left-0 h-[2px]"
-                style={{ background: 'rgba(248,113,113,0.5)' }}
-                initial={{ width: '100%' }}
-                animate={{ width: '0%' }}
-                transition={{ duration: REASON_TIMEOUT_MS / 1000, ease: 'linear' }}
-              />
-
-              <div className="px-5 pt-5 pb-1">
-                <p className="font-mono text-[10px] text-white/25 tracking-[0.2em] uppercase mb-4">
-                  What didn't work?
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                  {DISLIKE_REASONS.map(({ label, value }) => (
-                    <motion.button
-                      key={value}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={() => commitDislike(value)}
-                      className="py-3 px-4 font-mono text-[11px] tracking-wider text-white/60 text-left transition-colors hover:text-white/90"
-                      style={{
-                        background: 'rgba(255,255,255,0.04)',
-                        border: '1px solid rgba(255,255,255,0.08)',
-                        borderRadius: '8px',
-                      }}
-                    >
-                      {label}
-                    </motion.button>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-          </>
+              Go →
+            </a>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

@@ -47,6 +47,7 @@ def _style_results_path() -> Path:
     return p if p.exists() else APP_DIR / "style_results.json"
 
 LIKE_WEIGHT    = 0.3    # how much each like nudges the style vector
+GOLDEN_WEIGHT  = 0.55   # golden swipe nudges harder: confirmed style + price fit
 RESCORE_EVERY  = 10     # re-rank all 931 listings every N likes
 TOP_N          = 50     # entries returned by /feed and stored in style_results.json
 PRICE_MEDIAN   = 30.0   # € — used in deal scoring formula
@@ -432,6 +433,7 @@ def feedback():
     listing_id = body.get("listing_id") or body.get("id")
     action     = body.get("action") or body.get("direction")
     reason     = body.get("reason", "none")
+    is_golden  = bool(body.get("golden", False))
 
     # Normalise: frontend sends 'dislike', internal logic uses 'skip'
     if action == "dislike":
@@ -466,8 +468,9 @@ def feedback():
         return jsonify({"error": "embedding not found for id"}), 404
 
     rescored = False
+    weight = GOLDEN_WEIGHT if is_golden else LIKE_WEIGHT
     with _lock:
-        _style_vec = _l2(_style_vec + LIKE_WEIGHT * emb)
+        _style_vec = _l2(_style_vec + weight * emb)
         np.save(STYLE_VECTOR_FILE, _style_vec)
 
         _like_count += 1

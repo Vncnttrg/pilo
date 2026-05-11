@@ -14,3 +14,5 @@ export interface Listing {
   deal_score: number
   final_score: number
 }
+
+export type Action = 'like' | 'skip' | 'save' | 'golden'

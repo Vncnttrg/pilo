@@ -93,3 +93,50 @@ def test_feed_post_without_style_vector_falls_back_to_cache(client):
     assert rv.status_code == 200
     data = rv.get_json()
     assert isinstance(data, list)
+
+
+# ── /feedback ────────────────────────────────────────────────────────────────
+
+def test_golden_feedback_applies_higher_weight(client):
+    """Golden swipe should nudge the style vector more than a regular like."""
+    if not srv._emb_index or srv._style_vec is None:
+        pytest.skip("embeddings not loaded in test environment")
+
+    listing_id = srv._emb_ids[0]
+    vec_before = srv._style_vec.copy()
+    like_count_before = srv._like_count
+
+    try:
+        with (
+            patch.object(srv, "_append_feedback_log"),
+            patch.object(srv, "_rescore_and_save"),
+            patch("numpy.save"),
+        ):
+            client.post(
+                "/feedback",
+                json={"listing_id": listing_id, "action": "like", "golden": False},
+            )
+        vec_after_like = srv._style_vec.copy()
+        like_delta = float(np.linalg.norm(vec_after_like - vec_before))
+
+        srv._style_vec = vec_before.copy()
+        srv._like_count = like_count_before
+
+        with (
+            patch.object(srv, "_append_feedback_log"),
+            patch.object(srv, "_rescore_and_save"),
+            patch("numpy.save"),
+        ):
+            client.post(
+                "/feedback",
+                json={"listing_id": listing_id, "action": "like", "golden": True},
+            )
+        vec_after_golden = srv._style_vec.copy()
+        golden_delta = float(np.linalg.norm(vec_after_golden - vec_before))
+    finally:
+        srv._style_vec = vec_before
+        srv._like_count = like_count_before
+
+    assert golden_delta > like_delta, (
+        f"golden delta ({golden_delta:.6f}) should exceed like delta ({like_delta:.6f})"
+    )
