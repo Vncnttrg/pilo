@@ -72,6 +72,7 @@ _style_vec:  np.ndarray | None = None
 _onboarding_embs: dict[str, np.ndarray] = {}
 _style_results_cache: list[dict] = []
 _like_count: int = 0
+_pending_codes: dict[str, dict] = {}
 _lock = threading.Lock()
 
 
@@ -226,6 +227,16 @@ def onboard():
 
     style_vec = _l2(np.stack(vecs).mean(axis=0))
 
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() or None
+    email_hash, user = _get_user_from_token(token)
+    if user is not None:
+        user["gender"] = body.get("gender", user.get("gender"))
+        user["size"] = body.get("size", user.get("size"))
+        user["style_vector"] = style_vec.tolist()
+        user["completed_onboarding"] = True
+        _save_user(email_hash, user)
+
     with _lock:
         _style_vec = style_vec
         np.save(STYLE_VECTOR_FILE, _style_vec)
@@ -274,6 +285,66 @@ def save():
         saved.append(listing_id)
     SAVED_FILE.write_text(json.dumps(saved, indent=2), encoding="utf-8")
     return jsonify({"ok": True, "saved_count": len(saved)})
+
+
+@app.post("/register")
+def register():
+    body = request.get_json(silent=True) or {}
+    email = body.get("email", "").lower().strip()
+    if not email or "@" not in email:
+        return jsonify({"error": "invalid email"}), 400
+
+    import secrets
+    code = str(secrets.randbelow(1000000)).zfill(6)
+    _pending_codes[email] = {"code": code, "expires_at": time.time() + 600}
+
+    try:
+        _send_code_email(email, code)
+    except Exception as e:
+        print(f"Email send failed: {e}", flush=True)
+        return jsonify({"error": "email send failed"}), 500
+
+    return jsonify({"success": True})
+
+
+@app.post("/verify")
+def verify():
+    body = request.get_json(silent=True) or {}
+    email = body.get("email", "").lower().strip()
+    code = body.get("code", "").strip()
+
+    entry = _pending_codes.get(email)
+    if not entry or entry["code"] != code or time.time() > entry["expires_at"]:
+        return jsonify({"error": "Ungültiger oder abgelaufener Code"}), 400
+
+    del _pending_codes[email]
+
+    email_hash = hashlib.sha256(email.encode()).hexdigest()
+    user = _load_user(email_hash)
+
+    if user is None:
+        user = {
+            "email": email,
+            "token": str(uuid.uuid4()),
+            "gender": None,
+            "size": None,
+            "style_vector": None,
+            "completed_onboarding": False,
+            "feedback_log": [],
+            "created_at": int(time.time()),
+        }
+        _save_user(email_hash, user)
+
+    return jsonify({
+        "token": user["token"],
+        "user": {
+            "email": user["email"],
+            "gender": user.get("gender"),
+            "size": user.get("size"),
+            "style_vector": user.get("style_vector"),
+            "completed_onboarding": user.get("completed_onboarding", False),
+        },
+    })
 
 
 def _append_feedback_log(listing_id: int, action: str, reason: str) -> None:
@@ -328,6 +399,29 @@ def _get_user_from_token(token: str | None) -> tuple[str | None, dict | None]:
     return None, None
 
 
+def _send_code_email(email: str, code: str) -> None:
+    import urllib.request as _req
+
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    from_addr = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
+    payload = json.dumps({
+        "from": f"Pilo <{from_addr}>",
+        "to": [email],
+        "subject": "Dein Pilo Login-Code",
+        "text": f"Dein Einmalcode: {code}\nGültig für 10 Minuten.",
+    }).encode()
+    req = _req.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    with _req.urlopen(req, timeout=10) as resp:
+        resp.read()
+
+
 @app.post("/feedback")
 def feedback():
     global _style_vec, _like_count
@@ -348,6 +442,18 @@ def feedback():
 
     with _lock:
         _append_feedback_log(listing_id, action, reason)
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() or None
+    fb_email_hash, fb_user = _get_user_from_token(token)
+    if fb_user is not None:
+        fb_user.setdefault("feedback_log", []).append({
+            "listing_id": listing_id,
+            "action": action,
+            "reason": reason,
+            "timestamp": int(time.time()),
+        })
+        _save_user(fb_email_hash, fb_user)
 
     if action == "skip":
         return jsonify({"ok": True, "rescored": False})
