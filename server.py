@@ -26,6 +26,7 @@ from flask_cors import CORS
 # DATA_DIR: persistent volume — all mutable state is written here
 APP_DIR  = Path(__file__).parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", APP_DIR))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 EMBEDDINGS_FILE   = APP_DIR  / "embeddings.json"    # read-only, comes from git
 LISTINGS_FILE     = APP_DIR  / "listings.json"       # read-only, comes from git

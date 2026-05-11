@@ -9,7 +9,7 @@ import {
 } from 'framer-motion'
 import type { Listing } from './types'
 
-const API = 'http://localhost:5001'
+const API = import.meta.env.VITE_API_URL ?? 'http://localhost:5001'
 
 const SWIPE_X = 90
 const FLICK_V = 280
