@@ -54,21 +54,27 @@ _lock = threading.Lock()
 def _load_all() -> None:
     global _emb_index, _emb_matrix, _emb_ids, _listings, _style_vec
 
-    print("Loading embeddings…", flush=True)
-    emb_data = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
-    emb_list = emb_data["embeddings"]
-    _emb_ids = [e["id"] for e in emb_list]
-    _emb_index = {
-        e["id"]: np.array(e["embedding"], dtype=np.float32)
-        for e in emb_list
-    }
-    _emb_matrix = np.stack([_emb_index[i] for i in _emb_ids])  # (N, 512)
-    print(f"  {len(_emb_ids)} embeddings ({_emb_matrix.shape[1]}-dim)", flush=True)
+    if EMBEDDINGS_FILE.exists():
+        print("Loading embeddings…", flush=True)
+        emb_data = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
+        emb_list = emb_data["embeddings"]
+        _emb_ids = [e["id"] for e in emb_list]
+        _emb_index = {
+            e["id"]: np.array(e["embedding"], dtype=np.float32)
+            for e in emb_list
+        }
+        _emb_matrix = np.stack([_emb_index[i] for i in _emb_ids])
+        print(f"  {len(_emb_ids)} embeddings ({_emb_matrix.shape[1]}-dim)", flush=True)
+    else:
+        print("embeddings.json not found — /feedback will be unavailable", flush=True)
 
-    print("Loading listings…", flush=True)
-    listing_data = json.loads(LISTINGS_FILE.read_text(encoding="utf-8"))
-    _listings = {l["id"]: l for l in listing_data["listings"]}
-    print(f"  {len(_listings)} listings", flush=True)
+    if LISTINGS_FILE.exists():
+        print("Loading listings…", flush=True)
+        listing_data = json.loads(LISTINGS_FILE.read_text(encoding="utf-8"))
+        _listings = {l["id"]: l for l in listing_data["listings"]}
+        print(f"  {len(_listings)} listings", flush=True)
+    else:
+        print("listings.json not found — rescoring will be unavailable", flush=True)
 
     print("Loading style vector…", flush=True)
     _style_vec = _load_style_vector()
@@ -191,6 +197,9 @@ def feedback():
 
     if direction == "skip":
         return jsonify({"ok": True, "rescored": False})
+
+    if not _emb_index:
+        return jsonify({"ok": True, "rescored": False, "note": "embeddings not loaded"})
 
     # Like: update style vector
     emb = _emb_index.get(listing_id)
