@@ -7,21 +7,42 @@ import {
   animate,
   type PanInfo,
 } from 'framer-motion'
+import { Onboarding } from './Onboarding'
 import type { Listing } from './types'
-
-const API = import.meta.env.VITE_API_URL ?? 'http://localhost:5001'
+import { API, LS_ACTIONS, LS_STYLE_VECTOR } from './config'
 
 const SWIPE_X = 90
 const FLICK_V = 280
+const REASON_TIMEOUT_MS = 2000
 
 type Action = 'like' | 'skip' | 'save'
 type Actions = Record<number, Action>
+type DislikeReason = 'not_my_style' | 'wrong_size' | 'too_expensive' | 'bad_condition' | 'none'
+
+const DISLIKE_REASONS: { label: string; value: DislikeReason }[] = [
+  { label: 'Not my style', value: 'not_my_style' },
+  { label: 'Wrong size', value: 'wrong_size' },
+  { label: 'Too expensive', value: 'too_expensive' },
+  { label: 'Bad condition', value: 'bad_condition' },
+]
 
 function loadActions(): Actions {
   try {
-    return JSON.parse(localStorage.getItem('pilo-actions') || '{}')
+    return JSON.parse(localStorage.getItem(LS_ACTIONS) || '{}')
   } catch {
     return {}
+  }
+}
+
+function loadStoredStyleVector(): number[] | null {
+  try {
+    const stored = localStorage.getItem(LS_STYLE_VECTOR)
+    if (!stored) return null
+    const parsed = JSON.parse(stored)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    localStorage.removeItem(LS_STYLE_VECTOR)
+    return null
   }
 }
 
@@ -43,11 +64,11 @@ function ExternalLinkIcon() {
   )
 }
 
-function postFeedback(id: number, direction: 'like' | 'skip') {
+function postFeedback(id: number, action: 'like' | 'dislike', reason: DislikeReason = 'none') {
   fetch(`${API}/feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, direction }),
+    body: JSON.stringify({ listing_id: id, action, reason }),
   }).catch((err) => console.warn('feedback failed:', err))
 }
 
@@ -66,10 +87,23 @@ export default function App() {
   const [idx, setIdx] = useState(0)
   const [photoIdx, setPhotoIdx] = useState(0)
   const [actions, setActions] = useState<Actions>(loadActions)
+  const [showReasonSheet, setShowReasonSheet] = useState(false)
   const flying = useRef(false)
+  const reasonTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [styleVector, setStyleVector] = useState<number[] | null>(loadStoredStyleVector)
+  const showOnboarding = styleVector === null
 
   useEffect(() => {
-    fetch(`${API}/feed`)
+    if (!styleVector) return
+
+    setLoading(true)
+    setError(null)
+
+    fetch(`${API}/feed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ style_vector: styleVector }),
+    })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json() as Promise<Listing[]>
@@ -82,7 +116,7 @@ export default function App() {
         setError(String(err))
         setLoading(false)
       })
-  }, [])
+  }, [styleVector])
 
   const x = useMotionValue(0)
   const rotate = useTransform(x, [-280, 280], [-16, 16])
@@ -97,7 +131,7 @@ export default function App() {
   function recordAction(id: number, action: Action) {
     const updated = { ...actions, [id]: action }
     setActions(updated)
-    localStorage.setItem('pilo-actions', JSON.stringify(updated))
+    localStorage.setItem(LS_ACTIONS, JSON.stringify(updated))
   }
 
   function handleSave() {
@@ -106,23 +140,53 @@ export default function App() {
       const updated = { ...actions }
       delete updated[current.id]
       setActions(updated)
-      localStorage.setItem('pilo-actions', JSON.stringify(updated))
+      localStorage.setItem(LS_ACTIONS, JSON.stringify(updated))
     } else {
       recordAction(current.id, 'save')
       postSave(current.id)
     }
   }
 
-  function flyCard(dir: 'left' | 'right') {
+  function commitDislike(reason: DislikeReason) {
+    if (reasonTimer.current) {
+      clearTimeout(reasonTimer.current)
+      reasonTimer.current = null
+    }
+    setShowReasonSheet(false)
+    if (!current) {
+      flying.current = false
+      return
+    }
+    recordAction(current.id, 'skip')
+    postFeedback(current.id, 'dislike', reason)
+    animate(x, -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
+    setTimeout(() => {
+      setIdx((i) => i + 1)
+      setPhotoIdx(0)
+      x.set(0)
+      flying.current = false
+    }, 360)
+  }
+
+  function triggerDislikeFlow() {
     if (flying.current || !current) return
     flying.current = true
+    setShowReasonSheet(true)
+    reasonTimer.current = setTimeout(() => {
+      commitDislike('none')
+    }, REASON_TIMEOUT_MS)
+  }
 
-    const direction = dir === 'right' ? 'like' : 'skip'
-    recordAction(current.id, dir === 'right' ? 'like' : 'skip')
-    postFeedback(current.id, direction)
-
-    animate(x, dir === 'right' ? 700 : -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
-
+  function flyCard(dir: 'left' | 'right') {
+    if (flying.current || !current) return
+    if (dir === 'left') {
+      triggerDislikeFlow()
+      return
+    }
+    flying.current = true
+    recordAction(current.id, 'like')
+    postFeedback(current.id, 'like', 'none')
+    animate(x, 700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
     setTimeout(() => {
       setIdx((i) => i + 1)
       setPhotoIdx(0)
@@ -156,6 +220,10 @@ export default function App() {
   const saved = Object.values(actions).filter((a) => a === 'save').length
 
   // ── Loading / error states ────────────────────────────────────────────────
+
+  if (showOnboarding) {
+    return <Onboarding onComplete={setStyleVector} />
+  }
 
   if (loading) {
     return (
@@ -199,7 +267,7 @@ export default function App() {
             setIdx(0)
             setPhotoIdx(0)
             setActions({})
-            localStorage.removeItem('pilo-actions')
+            localStorage.removeItem(LS_ACTIONS)
           }}
           className="px-8 py-3 border border-white/15 text-white/40 font-mono text-xs tracking-widest hover:bg-white/5 transition-colors"
         >
@@ -410,6 +478,71 @@ export default function App() {
           ♥
         </motion.button>
       </div>
+
+      {/* Reason picker overlay + sheet */}
+      <AnimatePresence>
+        {showReasonSheet && (
+          <>
+            {/* Scrim — blocks interaction with card behind */}
+            <motion.div
+              className="absolute inset-0 z-[90]"
+              style={{ background: 'rgba(0,0,0,0.55)' }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+            />
+
+            {/* Bottom sheet */}
+            <motion.div
+              className="absolute bottom-0 left-0 right-0 z-[100]"
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', stiffness: 340, damping: 34 }}
+              style={{
+                background: 'rgba(14, 14, 14, 0.98)',
+                backdropFilter: 'blur(24px)',
+                WebkitBackdropFilter: 'blur(24px)',
+                borderTop: '1px solid rgba(255,255,255,0.07)',
+                paddingBottom: 'max(env(safe-area-inset-bottom), 28px)',
+              }}
+            >
+              {/* Progress bar — shrinks over 2s */}
+              <motion.div
+                className="absolute top-0 left-0 h-[2px]"
+                style={{ background: 'rgba(248,113,113,0.5)' }}
+                initial={{ width: '100%' }}
+                animate={{ width: '0%' }}
+                transition={{ duration: REASON_TIMEOUT_MS / 1000, ease: 'linear' }}
+              />
+
+              <div className="px-5 pt-5 pb-1">
+                <p className="font-mono text-[10px] text-white/25 tracking-[0.2em] uppercase mb-4">
+                  What didn't work?
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  {DISLIKE_REASONS.map(({ label, value }) => (
+                    <motion.button
+                      key={value}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => commitDislike(value)}
+                      className="py-3 px-4 font-mono text-[11px] tracking-wider text-white/60 text-left transition-colors hover:text-white/90"
+                      style={{
+                        background: 'rgba(255,255,255,0.04)',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        borderRadius: '8px',
+                      }}
+                    >
+                      {label}
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

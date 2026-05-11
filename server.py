@@ -14,6 +14,7 @@ Dependencies:
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 EMBEDDINGS_FILE   = APP_DIR  / "embeddings.json"    # read-only, comes from git
 LISTINGS_FILE     = APP_DIR  / "listings.json"       # read-only, comes from git
 STYLE_VECTOR_FILE = DATA_DIR / "style_vector.npy"   # updated by /feedback
+ONBOARDING_EMBEDDINGS_FILE = APP_DIR / "onboarding_embeddings.json"
 SAVED_FILE        = DATA_DIR / "saved.json"          # updated by /save
+FEEDBACK_LOG_FILE = DATA_DIR / "feedback_log.json"   # append-only reason log
 
 
 def _style_results_path() -> Path:
@@ -43,6 +46,11 @@ LIKE_WEIGHT    = 0.3    # how much each like nudges the style vector
 RESCORE_EVERY  = 10     # re-rank all 931 listings every N likes
 TOP_N          = 50     # entries returned by /feed and stored in style_results.json
 PRICE_MEDIAN   = 30.0   # € — used in deal scoring formula
+
+
+def _l2(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    return v / n if n > 0 else v
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 
@@ -57,6 +65,8 @@ _emb_ids:    list[int] = []               # ordered ids matching _emb_matrix row
 _listings:   dict[int, dict] = {}         # id → listing metadata
 
 _style_vec:  np.ndarray | None = None
+_onboarding_embs: dict[str, np.ndarray] = {}
+_style_results_cache: list[dict] = []
 _like_count: int = 0
 _lock = threading.Lock()
 
@@ -86,6 +96,24 @@ def _load_all() -> None:
     else:
         print("listings.json not found — rescoring will be unavailable", flush=True)
 
+    if ONBOARDING_EMBEDDINGS_FILE.exists():
+        print("Loading onboarding embeddings…", flush=True)
+        onb_data = json.loads(ONBOARDING_EMBEDDINGS_FILE.read_text(encoding="utf-8"))
+        _onboarding_embs.update({
+            k: np.array(v, dtype=np.float32)
+            for k, v in onb_data["embeddings"].items()
+        })
+        print(f"  {len(_onboarding_embs)} onboarding images", flush=True)
+    else:
+        print("onboarding_embeddings.json not found — /onboard will be unavailable", flush=True)
+
+    p = _style_results_path()
+    if p.exists():
+        try:
+            _style_results_cache[:] = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
     print("Loading style vector…", flush=True)
     _style_vec = _load_style_vector()
     print("  done", flush=True)
@@ -94,29 +122,25 @@ def _load_all() -> None:
 def _load_style_vector() -> np.ndarray:
     """Load from disk, or bootstrap from the current top results if absent."""
     if STYLE_VECTOR_FILE.exists():
-        vec = np.load(STYLE_VECTOR_FILE)
-        norm = np.linalg.norm(vec)
-        return vec / norm if norm > 0 else vec
+        return _l2(np.load(STYLE_VECTOR_FILE))
 
     print("  style_vector.npy not found — bootstrapping from style_results.json", flush=True)
     results = json.loads(_style_results_path().read_text(encoding="utf-8"))
     top_ids = [r["id"] for r in results[:10] if r["id"] in _emb_index]
 
-    if top_ids:
-        vecs = np.stack([_emb_index[i] for i in top_ids])
-    else:
-        vecs = _emb_matrix  # fall back to mean of everything
-
-    mean = vecs.mean(axis=0)
-    vec = mean / np.linalg.norm(mean)
+    vecs = np.stack([_emb_index[i] for i in top_ids]) if top_ids else _emb_matrix
+    vec = _l2(vecs.mean(axis=0))
     np.save(STYLE_VECTOR_FILE, vec)
     return vec
 
 
 # ─── Scoring ──────────────────────────────────────────────────────────────────
 
-def _rescore_and_save(style_vec: np.ndarray) -> None:
-    """Re-rank all listings and overwrite style_results.json (runs in ~10ms)."""
+def _compute_rankings(style_vec: np.ndarray) -> list[dict]:
+    """Rank all listings by style_vec. Does not write to disk."""
+    if _emb_matrix is None:
+        return []
+
     scores = (_emb_matrix @ style_vec).tolist()
 
     max_favs = max(
@@ -155,15 +179,24 @@ def _rescore_and_save(style_vec: np.ndarray) -> None:
         })
 
     ranked.sort(key=lambda x: x["final_score"], reverse=True)
+    return ranked
+
+
+def _rescore_and_save(style_vec: np.ndarray) -> None:
+    """Re-rank all listings and overwrite style_results.json (runs in ~10ms)."""
+    global _style_results_cache
+    ranked = _compute_rankings(style_vec)
+    _style_results_cache = ranked[:TOP_N]
     (DATA_DIR / "style_results.json").write_text(
-        json.dumps(ranked[:TOP_N], indent=2, ensure_ascii=False),
+        json.dumps(_style_results_cache, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(
-        f"Re-scored {len(ranked)} listings — new #1: {ranked[0]['brand']} "
-        f"(score {ranked[0]['final_score']:.4f})",
-        flush=True,
-    )
+    if ranked:
+        print(
+            f"Re-scored {len(ranked)} listings — new #1: {ranked[0]['brand']} "
+            f"(score {ranked[0]['final_score']:.4f})",
+            flush=True,
+        )
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
@@ -173,8 +206,48 @@ def health():
     return jsonify({"ok": True})
 
 
-@app.get("/feed")
+@app.post("/onboard")
+def onboard():
+    global _style_vec
+
+    body = request.get_json(silent=True) or {}
+    selected_images = body.get("selected_images", [])
+
+    if not isinstance(selected_images, list) or not selected_images:
+        return jsonify({"error": "no images selected"}), 400
+
+    vecs = [_onboarding_embs[k] for k in selected_images if k in _onboarding_embs]
+    if not vecs:
+        return jsonify({"error": "no valid embeddings"}), 400
+
+    style_vec = _l2(np.stack(vecs).mean(axis=0))
+
+    with _lock:
+        _style_vec = style_vec
+        np.save(STYLE_VECTOR_FILE, _style_vec)
+        if _emb_matrix is not None:
+            _rescore_and_save(_style_vec)
+
+    return jsonify({"style_vector": style_vec.tolist()})
+
+
+@app.route("/feed", methods=["GET", "POST"])
 def feed():
+    body = request.get_json(silent=True) or {}
+    style_vector = body.get("style_vector")
+
+    if style_vector and _emb_matrix is not None:
+        try:
+            vec = np.array(style_vector, dtype=np.float32)
+            if vec.ndim == 1 and vec.shape[0] == _emb_matrix.shape[1]:
+                ranked = _compute_rankings(_l2(vec))
+                return jsonify(ranked[:TOP_N])
+            print("Invalid style_vector shape for /feed POST; returning cache", flush=True)
+        except Exception as e:
+            print(f"Invalid style_vector for /feed POST: {e}", flush=True)
+
+    if _style_results_cache:
+        return jsonify(_style_results_cache[:TOP_N])
     results = json.loads(_style_results_path().read_text(encoding="utf-8"))
     return jsonify(results[:TOP_N])
 
@@ -199,33 +272,59 @@ def save():
     return jsonify({"ok": True, "saved_count": len(saved)})
 
 
+def _append_feedback_log(listing_id: int, action: str, reason: str) -> None:
+    """Append a feedback event to feedback_log.json for pattern analysis."""
+    log: list = []
+    if FEEDBACK_LOG_FILE.exists():
+        try:
+            log = json.loads(FEEDBACK_LOG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            log = []
+    log.append({
+        "listing_id": listing_id,
+        "action": action,
+        "reason": reason,
+        "timestamp": int(time.time()),
+    })
+    FEEDBACK_LOG_FILE.write_text(
+        json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 @app.post("/feedback")
 def feedback():
     global _style_vec, _like_count
 
     body = request.get_json(silent=True) or {}
-    listing_id = body.get("id")
-    direction  = body.get("direction")
 
-    if listing_id is None or direction not in ("like", "skip"):
+    # Accept new format (listing_id, action) or legacy (id, direction)
+    listing_id = body.get("listing_id") or body.get("id")
+    action     = body.get("action") or body.get("direction")
+    reason     = body.get("reason", "none")
+
+    # Normalise: frontend sends 'dislike', internal logic uses 'skip'
+    if action == "dislike":
+        action = "skip"
+
+    if listing_id is None or action not in ("like", "skip"):
         return jsonify({"error": "invalid payload"}), 400
 
-    if direction == "skip":
+    with _lock:
+        _append_feedback_log(listing_id, action, reason)
+
+    if action == "skip":
         return jsonify({"ok": True, "rescored": False})
 
     if not _emb_index:
         return jsonify({"ok": True, "rescored": False, "note": "embeddings not loaded"})
 
-    # Like: update style vector
     emb = _emb_index.get(listing_id)
     if emb is None:
         return jsonify({"error": "embedding not found for id"}), 404
 
     rescored = False
     with _lock:
-        _style_vec = _style_vec + LIKE_WEIGHT * emb
-        norm = np.linalg.norm(_style_vec)
-        _style_vec = _style_vec / norm if norm > 0 else _style_vec
+        _style_vec = _l2(_style_vec + LIKE_WEIGHT * emb)
         np.save(STYLE_VECTOR_FILE, _style_vec)
 
         _like_count += 1
