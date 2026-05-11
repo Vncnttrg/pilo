@@ -168,6 +168,11 @@ def _rescore_and_save(style_vec: np.ndarray) -> None:
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
+@app.get("/health")
+def health():
+    return jsonify({"ok": True})
+
+
 @app.get("/feed")
 def feed():
     results = json.loads(_style_results_path().read_text(encoding="utf-8"))
