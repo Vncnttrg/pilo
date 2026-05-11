@@ -12,6 +12,7 @@ Dependencies:
 """
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -215,7 +216,10 @@ def feedback():
 
 # ─── Startup ─────────────────────────────────────────────────────────────────
 
+# Run at import time so gunicorn workers have data loaded before serving.
+_load_all()
+
 if __name__ == "__main__":
-    _load_all()
-    print("\nPilo API running on http://localhost:5001\n", flush=True)
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    port = int(os.environ.get("PORT", 5001))
+    print(f"\nPilo API running on http://localhost:{port}\n", flush=True)
+    app.run(host="0.0.0.0", port=port)
