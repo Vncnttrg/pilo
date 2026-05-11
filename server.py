@@ -11,10 +11,12 @@ Dependencies:
     pip install flask flask-cors numpy
 """
 
+import hashlib
 import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +37,8 @@ STYLE_VECTOR_FILE = DATA_DIR / "style_vector.npy"   # updated by /feedback
 ONBOARDING_EMBEDDINGS_FILE = APP_DIR / "onboarding_embeddings.json"
 SAVED_FILE        = DATA_DIR / "saved.json"          # updated by /save
 FEEDBACK_LOG_FILE = DATA_DIR / "feedback_log.json"   # append-only reason log
+USERS_DIR         = DATA_DIR / "users"
+USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _style_results_path() -> Path:
@@ -289,6 +293,39 @@ def _append_feedback_log(listing_id: int, action: str, reason: str) -> None:
     FEEDBACK_LOG_FILE.write_text(
         json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def _user_path(email_hash: str) -> Path:
+    return USERS_DIR / f"{email_hash}.json"
+
+
+def _load_user(email_hash: str) -> dict | None:
+    p = _user_path(email_hash)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_user(email_hash: str, user: dict) -> None:
+    _user_path(email_hash).write_text(
+        json.dumps(user, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _get_user_from_token(token: str | None) -> tuple[str | None, dict | None]:
+    if not token:
+        return None, None
+    for p in USERS_DIR.glob("*.json"):
+        try:
+            user = json.loads(p.read_text(encoding="utf-8"))
+            if user.get("token") == token:
+                return p.stem, user
+        except Exception:
+            continue
+    return None, None
 
 
 @app.post("/feedback")
