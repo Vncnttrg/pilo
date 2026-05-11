@@ -22,12 +22,21 @@ from flask_cors import CORS
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-DATA_DIR           = Path(os.environ.get("DATA_DIR", Path(__file__).parent))
-EMBEDDINGS_FILE    = DATA_DIR / "embeddings.json"
-LISTINGS_FILE      = DATA_DIR / "listings.json"
-STYLE_VECTOR_FILE  = DATA_DIR / "style_vector.npy"
-STYLE_RESULTS_FILE = DATA_DIR / "style_results.json"
-SAVED_FILE         = DATA_DIR / "saved.json"
+# APP_DIR: git checkout — read-only source for large static files
+# DATA_DIR: persistent volume — all mutable state is written here
+APP_DIR  = Path(__file__).parent
+DATA_DIR = Path(os.environ.get("DATA_DIR", APP_DIR))
+
+EMBEDDINGS_FILE   = APP_DIR  / "embeddings.json"    # read-only, comes from git
+LISTINGS_FILE     = APP_DIR  / "listings.json"       # read-only, comes from git
+STYLE_VECTOR_FILE = DATA_DIR / "style_vector.npy"   # updated by /feedback
+SAVED_FILE        = DATA_DIR / "saved.json"          # updated by /save
+
+
+def _style_results_path() -> Path:
+    """DATA_DIR version once it exists (post-rescore), else the git seed."""
+    p = DATA_DIR / "style_results.json"
+    return p if p.exists() else APP_DIR / "style_results.json"
 
 LIKE_WEIGHT    = 0.3    # how much each like nudges the style vector
 RESCORE_EVERY  = 10     # re-rank all 931 listings every N likes
@@ -89,7 +98,7 @@ def _load_style_vector() -> np.ndarray:
         return vec / norm if norm > 0 else vec
 
     print("  style_vector.npy not found — bootstrapping from style_results.json", flush=True)
-    results = json.loads(STYLE_RESULTS_FILE.read_text(encoding="utf-8"))
+    results = json.loads(_style_results_path().read_text(encoding="utf-8"))
     top_ids = [r["id"] for r in results[:10] if r["id"] in _emb_index]
 
     if top_ids:
@@ -145,7 +154,7 @@ def _rescore_and_save(style_vec: np.ndarray) -> None:
         })
 
     ranked.sort(key=lambda x: x["final_score"], reverse=True)
-    STYLE_RESULTS_FILE.write_text(
+    (DATA_DIR / "style_results.json").write_text(
         json.dumps(ranked[:TOP_N], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -160,7 +169,7 @@ def _rescore_and_save(style_vec: np.ndarray) -> None:
 
 @app.get("/feed")
 def feed():
-    results = json.loads(STYLE_RESULTS_FILE.read_text(encoding="utf-8"))
+    results = json.loads(_style_results_path().read_text(encoding="utf-8"))
     return jsonify(results[:TOP_N])
 
 
