@@ -22,12 +22,12 @@ from flask_cors import CORS
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-BASE               = Path(__file__).parent
-EMBEDDINGS_FILE    = BASE / "embeddings.json"
-LISTINGS_FILE      = BASE / "listings.json"
-STYLE_VECTOR_FILE  = BASE / "style_vector.npy"
-STYLE_RESULTS_FILE = BASE / "style_results.json"
-SAVED_FILE         = BASE / "saved.json"
+DATA_DIR           = Path(os.environ.get("DATA_DIR", Path(__file__).parent))
+EMBEDDINGS_FILE    = DATA_DIR / "embeddings.json"
+LISTINGS_FILE      = DATA_DIR / "listings.json"
+STYLE_VECTOR_FILE  = DATA_DIR / "style_vector.npy"
+STYLE_RESULTS_FILE = DATA_DIR / "style_results.json"
+SAVED_FILE         = DATA_DIR / "saved.json"
 
 LIKE_WEIGHT    = 0.3    # how much each like nudges the style vector
 RESCORE_EVERY  = 10     # re-rank all 931 listings every N likes
