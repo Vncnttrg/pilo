@@ -318,6 +318,7 @@ export default function App() {
 
   function handleUndoSwipe() {
     if (flying.current) return
+    setReasonChip(null)
     const entry = swipeHistory.at(-1)
     if (!entry) return
 
@@ -469,10 +470,14 @@ export default function App() {
   function flyCard(dir: 'left' | 'right') {
     if (flying.current || !current) return
     flying.current = true
+    setReasonChip(null)
     rememberSwipe()
     if (dir === 'left') {
       recordAction(current.id, 'skip')
       postDailyDropEvent('item_disliked', current, token)
+      if (Math.random() < 0.2) {
+        setReasonChip({ listingId: current.id, capsuleId: current.capsule_id })
+      }
       animate(x, -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
     } else {
       recordAction(current.id, 'like')
@@ -503,6 +508,7 @@ export default function App() {
   function flyCardGolden() {
     if (flying.current || !current) return
     flying.current = true
+    setReasonChip(null)
     rememberSwipe()
     recordAction(current.id, 'golden')
     postFeedback(current.id, 'like', token, true, current.capsule_id)
