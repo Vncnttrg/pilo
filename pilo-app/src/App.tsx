@@ -1000,6 +1000,42 @@ export default function App() {
         </motion.div>
       </div>
 
+      {/* Skip reason chips */}
+      <AnimatePresence>
+        {reasonChip && (
+          <motion.div
+            className="absolute left-0 right-0 z-[60] flex justify-center gap-2 px-6"
+            style={{ bottom: 'calc(max(env(safe-area-inset-bottom), 22px) + 80px)' }}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 6 }}
+            transition={{ duration: 0.18 }}
+          >
+            {([
+              { label: 'Wrong size', reason: 'wrong_size' },
+              { label: 'Too expensive', reason: 'too_expensive' },
+              { label: 'Not my style', reason: 'not_my_style' },
+            ] as const).map(({ label, reason }) => (
+              <button
+                key={reason}
+                onClick={() => {
+                  postFeedback(reasonChip.listingId, 'dislike', token, false, reasonChip.capsuleId, reason)
+                  setReasonChip(null)
+                }}
+                className="rounded-full px-4 py-2 font-mono text-[10px] tracking-widest text-[#1E1C1A] whitespace-nowrap"
+                style={{
+                  background: 'rgba(255,255,255,0.93)',
+                  border: '1px solid rgba(30,28,26,0.12)',
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.12)',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Action buttons */}
       <div
         className="absolute bottom-0 left-0 right-0 z-50 flex justify-center items-center gap-7 px-8"
