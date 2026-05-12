@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import server as srv
 
@@ -185,6 +186,13 @@ def test_onboard_with_token_updates_user_file(client):
     assert saved["size"] == "M"
     assert saved["style_vector"] is not None
     assert len(saved["style_vector"]) == 512
+    assert 1 <= len(saved["capsules"]) <= 3
+    assert saved["global_constraints"] == {
+        "gender": "men",
+        "sizes": ["M"],
+        "price_min": None,
+        "price_max": None,
+    }
 
 
 def test_feedback_with_token_appends_to_user_log(client):
@@ -200,11 +208,16 @@ def test_feedback_with_token_appends_to_user_log(client):
         "created_at": int(time.time()),
     }
     srv._save_user(email_hash, user)
+    listing_id = srv._emb_ids[0]
 
     with patch("numpy.save"):
         rv = client.post(
             "/feedback",
-            json={"listing_id": 1, "action": "dislike", "reason": "too_expensive"},
+            json={
+                "listing_id": listing_id,
+                "action": "dislike",
+                "reason": "too_expensive",
+            },
             headers={"Authorization": "Bearer fb-token"},
         )
     assert rv.status_code == 200
@@ -212,6 +225,85 @@ def test_feedback_with_token_appends_to_user_log(client):
     saved = srv._load_user(email_hash)
     assert len(saved["feedback_log"]) == 1
     entry = saved["feedback_log"][0]
-    assert entry["listing_id"] == 1
+    assert entry["listing_id"] == listing_id
     assert entry["action"] == "skip"
     assert entry["reason"] == "too_expensive"
+
+
+def test_verify_migrates_legacy_style_vector_to_capsule(client):
+    email_hash = hashlib.sha256(b"legacy@example.com").hexdigest()
+    legacy_vec = srv._style_vec.tolist()
+    user = {
+        "email": "legacy@example.com",
+        "token": "legacy-token",
+        "gender": "men",
+        "size": "M",
+        "style_vector": legacy_vec,
+        "completed_onboarding": True,
+        "feedback_log": [],
+        "created_at": int(time.time()),
+    }
+    srv._save_user(email_hash, user)
+
+    _plant_code("legacy@example.com", "444444")
+    rv = client.post("/verify", json={"email": "legacy@example.com", "code": "444444"})
+
+    assert rv.status_code == 200
+    data = rv.get_json()
+    assert data["user"]["capsules"][0]["id"] == "legacy-default"
+    assert len(data["user"]["capsules"][0]["vector"]) == 512
+
+    saved = srv._load_user(email_hash)
+    assert saved["capsules"][0]["id"] == "legacy-default"
+
+
+def test_dislike_updates_only_generated_capsule(client):
+    if len(srv._emb_ids) < 3:
+        pytest.skip("not enough embeddings loaded")
+
+    email_hash = hashlib.sha256(b"capsules@example.com").hexdigest()
+    capsule_a = srv._new_capsule("a", "clean minimal", srv._emb_index[srv._emb_ids[0]], confidence=0.8)
+    capsule_b = srv._new_capsule("b", "vintage", srv._emb_index[srv._emb_ids[1]], confidence=0.8)
+    user = {
+        "email": "capsules@example.com",
+        "token": "capsule-token",
+        "gender": None,
+        "size": None,
+        "style_vector": None,
+        "capsules": [capsule_a, capsule_b],
+        "global_constraints": {"gender": None, "sizes": [], "price_min": None, "price_max": None},
+        "completed_onboarding": True,
+        "feedback_log": [],
+        "created_at": int(time.time()),
+    }
+    srv._save_user(email_hash, user)
+
+    before_a = np.array(capsule_a["vector"], dtype=np.float32)
+    before_b = np.array(capsule_b["vector"], dtype=np.float32)
+    listing_id = srv._emb_ids[2]
+    old_status = srv._listings[listing_id].get("status")
+    srv._listings[listing_id]["status"] = "Zufriedenstellend"
+    try:
+        rv = client.post(
+            "/feedback",
+            json={
+                "listing_id": listing_id,
+                "action": "dislike",
+                "reason": "bad_condition",
+                "capsule_id": "b",
+            },
+            headers={"Authorization": "Bearer capsule-token"},
+        )
+    finally:
+        srv._listings[listing_id]["status"] = old_status
+
+    assert rv.status_code == 200
+    saved = srv._load_user(email_hash)
+    after_a = np.array(saved["capsules"][0]["vector"], dtype=np.float32)
+    after_b = np.array(saved["capsules"][1]["vector"], dtype=np.float32)
+    # bad_condition is a condition-only signal: vector and confidence are
+    # intentionally left unchanged; only negative_attributes is bumped.
+    assert np.allclose(after_a, before_a)
+    assert np.allclose(after_b, before_b)
+    assert saved["capsules"][1]["confidence"] == pytest.approx(capsule_b["confidence"])
+    assert "condition:zufriedenstellend" in saved["capsules"][1]["negative_attributes"]
