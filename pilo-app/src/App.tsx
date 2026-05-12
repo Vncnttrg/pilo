@@ -191,6 +191,7 @@ export default function App() {
   const [swipeHistory, setSwipeHistory] = useState<SwipeHistoryEntry[]>([])
   const [showGoldenToast, setShowGoldenToast] = useState(false)
   const [lastGoldenItem, setLastGoldenItem] = useState<Listing | null>(null)
+  const [reasonChip, setReasonChip] = useState<{ listingId: number; capsuleId?: string } | null>(null)
   const [endTab, setEndTab] = useState<'likes' | 'wants'>('wants')
   const [viewingList, setViewingList] = useState(false)
   const [batchCount, setBatchCount] = useState(1)
@@ -255,6 +256,12 @@ export default function App() {
     const timer = setTimeout(() => setShowGoldenToast(false), 2500)
     return () => clearTimeout(timer)
   }, [showGoldenToast])
+
+  useEffect(() => {
+    if (!reasonChip) return
+    const t = setTimeout(() => setReasonChip(null), 3000)
+    return () => clearTimeout(t)
+  }, [reasonChip])
 
   const x = useMotionValue(0)
   const rotate = useTransform(x, [-280, 280], [-16, 16])
