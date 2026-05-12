@@ -472,12 +472,12 @@ export default function App() {
     flying.current = true
     setReasonChip(null)
     rememberSwipe()
+    const shouldShowChips = dir === 'left' && Math.random() < 0.2
+    const chippedId = current.id
+    const chippedCapsuleId = current.capsule_id
     if (dir === 'left') {
       recordAction(current.id, 'skip')
       postDailyDropEvent('item_disliked', current, token)
-      if (Math.random() < 0.2) {
-        setReasonChip({ listingId: current.id, capsuleId: current.capsule_id })
-      }
       animate(x, -700, { duration: 0.32, ease: [0.22, 1, 0.36, 1] })
     } else {
       recordAction(current.id, 'like')
@@ -502,6 +502,9 @@ export default function App() {
       x.set(0)
       y.set(0)
       flying.current = false
+      if (shouldShowChips) {
+        setReasonChip({ listingId: chippedId, capsuleId: chippedCapsuleId })
+      }
     }, 360)
   }
 
